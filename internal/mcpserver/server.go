@@ -33,6 +33,11 @@ type Deps struct {
 	OutputDir string
 	// Download saves an output artifact, returning its local path.
 	Download func(ctx context.Context, dir, name, ext, url string) (string, error)
+	// Upload publishes a local file and returns its public URL. Nil when no
+	// upload backend is configured.
+	Upload func(ctx context.Context, path string) (string, error)
+	// UploadBackend names the configured backend, for tool descriptions.
+	UploadBackend string
 	// ServerName and ServerVersion identify this server to the client.
 	ServerName    string
 	ServerVersion string
@@ -207,6 +212,10 @@ func (s *Server) tools() []toolDef {
 						"type": "boolean", "default": true,
 						"description": "block until the job finishes",
 					},
+					"upload": map[string]any{
+						"type": "boolean", "default": false,
+						"description": "also publish each result to a public URL (requires an upload backend to be configured)",
+					},
 					"timeout_seconds": map[string]any{"type": "integer", "default": 600},
 				},
 				"required": []string{"model", "params"},
@@ -234,7 +243,25 @@ func (s *Server) tools() []toolDef {
 				},
 			},
 		},
+		{
+			Name:  "upload_file",
+			Title: "Upload a file",
+			Description: "Publish a local file to a public URL using the configured upload backend" +
+				uploadBackendNote(s.deps.UploadBackend) + ".",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string", "description": "local file path"}},
+				"required":   []string{"path"},
+			},
+		},
 	}
+}
+
+func uploadBackendNote(backend string) string {
+	if backend == "" || backend == "none" {
+		return " (currently disabled — set upload_backend first)"
+	}
+	return " (" + backend + ")"
 }
 
 type callParams struct {
@@ -321,6 +348,22 @@ func (s *Server) dispatch(ctx context.Context, cp callParams) (any, error) {
 		}
 		return job, nil
 
+	case "upload_file":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(cp.Arguments, &a); err != nil {
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+		if s.deps.Upload == nil {
+			return nil, fmt.Errorf("uploading is disabled — configure one with `bara settings set upload_backend <name>`")
+		}
+		url, err := s.deps.Upload(ctx, a.Path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": a.Path, "url": url}, nil
+
 	case "list_jobs":
 		var a struct {
 			Status string `json:"status"`
@@ -344,6 +387,7 @@ func (s *Server) toolGenerate(ctx context.Context, raw json.RawMessage) (any, er
 		Model          string         `json:"model"`
 		Params         map[string]any `json:"params"`
 		Wait           *bool          `json:"wait"`
+		Upload         bool           `json:"upload"`
 		TimeoutSeconds int            `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -434,6 +478,22 @@ func (s *Server) toolGenerate(ctx context.Context, raw json.RawMessage) (any, er
 					return nil, err
 				}
 				o.LocalPath = path
+			}
+		}
+		if a.Upload {
+			if s.deps.Upload == nil {
+				return nil, fmt.Errorf("upload was requested but no upload backend is configured — run `bara settings set upload_backend <name>`")
+			}
+			for i := range job.Outputs {
+				o := &job.Outputs[i]
+				if o.LocalPath == "" || o.PublicURL != "" {
+					continue
+				}
+				url, err := s.deps.Upload(ctx, o.LocalPath)
+				if err != nil {
+					return nil, err
+				}
+				o.PublicURL = url
 			}
 		}
 		store.Put(job)

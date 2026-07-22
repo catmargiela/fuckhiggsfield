@@ -37,7 +37,11 @@ func newMCPServeCmd(app *App) *cobra.Command {
 			if err := app.Load(); err != nil {
 				return err
 			}
-			srv := mcpserver.New(mcpserver.Deps{
+			up, err := app.Uploader("")
+			if err != nil {
+				return err
+			}
+			deps := mcpserver.Deps{
 				Catalog: app.Catalog,
 				ProviderFor: func(m catalog.Model) (provider.Provider, error) {
 					return app.ProviderFor(m)
@@ -46,9 +50,16 @@ func newMCPServeCmd(app *App) *cobra.Command {
 				Download: func(ctx context.Context, dir, name, ext, url string) (string, error) {
 					return media.Download(ctx, app.HTTP, dir, name, ext, url)
 				},
+				UploadBackend: app.Cfg.UploadBackend,
 				ServerName:    "bara",
 				ServerVersion: Version,
-			}, os.Stdout)
+			}
+			if up != nil {
+				deps.Upload = func(ctx context.Context, path string) (string, error) {
+					return uploadPath(ctx, up, path)
+				}
+			}
+			srv := mcpserver.New(deps, os.Stdout)
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
