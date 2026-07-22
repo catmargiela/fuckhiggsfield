@@ -1,0 +1,15 @@
+# Build output
+/bara
+/dist/
+*.exe
+
+# npm wrapper artifacts
+/npm/vendor/
+/npm/node_modules/
+
+# Local generation output
+/bara-output/
+
+# Editor / OS
+.DS_Store
+*.swp
