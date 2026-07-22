@@ -16,6 +16,7 @@ import (
 	"github.com/catmargiela/fuckhiggsfield/internal/provider/openai"
 	"github.com/catmargiela/fuckhiggsfield/internal/provider/runpod"
 	"github.com/catmargiela/fuckhiggsfield/internal/render"
+	"github.com/catmargiela/fuckhiggsfield/internal/uploader"
 )
 
 // Build metadata, injected via -ldflags.
@@ -86,6 +87,30 @@ func (a *App) ProviderFor(m catalog.Model) (provider.Provider, error) {
 	return nil, fmt.Errorf("model %s has unknown provider %q", m.ID, m.Provider)
 }
 
+// Uploader builds the configured uploader. It returns (nil, nil) when
+// uploading is disabled, which is the default. Passing override forces a
+// backend for a single command.
+func (a *App) Uploader(override string) (uploader.Uploader, error) {
+	backend := a.Cfg.UploadBackend
+	if override != "" {
+		backend = override
+	}
+	return uploader.New(uploader.Config{
+		Backend:        backend,
+		CatboxUserHash: a.Creds.CatboxUserHash,
+		LitterboxTime:  a.Cfg.LitterboxTime,
+		S3Endpoint:     a.Cfg.S3Endpoint,
+		S3Bucket:       a.Cfg.S3Bucket,
+		S3Region:       a.Cfg.S3Region,
+		S3AccessKey:    a.Creds.S3AccessKey,
+		S3SecretKey:    a.Creds.S3SecretKey,
+		S3Prefix:       a.Cfg.S3Prefix,
+		S3PathStyle:    a.Cfg.S3UsePathStyle(),
+		PublicBaseURL:  a.Cfg.UploadBaseURL,
+		HTTP:           a.HTTP,
+	})
+}
+
 // ProviderByName returns a client for a provider key, for polling jobs whose
 // model is no longer in the catalog.
 func (a *App) ProviderByName(name string) (provider.Provider, error) {
@@ -134,6 +159,7 @@ func NewRoot() *cobra.Command {
 		newSettingsCmd(app),
 		newModelCmd(app),
 		newGenerateCmd(app),
+		newUploadCmd(app),
 		newMCPCmd(app),
 		newVersionCmd(app),
 	)

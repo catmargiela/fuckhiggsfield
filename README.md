@@ -18,6 +18,7 @@ account, no platform credits.
 - [Configuration](#configuration)
 - [Examples](#examples)
 - [Models](#models)
+- [URL outputs](#getting-a-url-instead-of-a-file)
 - [MCP server](#mcp-server)
 - [Commands](#commands)
 - [How it works](#how-it-works)
@@ -88,6 +89,7 @@ precedence over the file and never touches disk:
 | `BARA_OUTPUT_DIR` | where media is saved |
 | `BARA_OPENAI_BASE_URL` / `BARA_RUNPOD_BASE_URL` | point at a proxy or gateway |
 | `BARA_CONFIG_DIR` | relocate the whole config directory |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 upload credentials |
 | `NO_COLOR` | disable ANSI styling |
 
 ## Examples
@@ -134,8 +136,9 @@ bara generate create wan_2_6_i2v \
   --wait
 ```
 
-Media flags take a local path **or** a URL. Local files are inlined as data URIs,
-so no bucket is needed.
+Media flags take a local path **or** a URL. Local files are inlined as data URIs
+by default, so no bucket is needed — see [URL outputs](#getting-a-url-instead-of-a-file)
+if you would rather they were uploaded.
 
 ### Multi-image edit
 
@@ -152,6 +155,62 @@ bara generate create nano_banana_pro_edit \
 ```bash
 bara generate create chatterbox_turbo --prompt "Hello from bara" --voice lucy --wait
 ```
+
+### Getting a URL instead of a file
+
+OpenAI returns images as base64 with no URL, and RunPod's own result links
+expire after 7 days — so by default you get a local file. `--upload` republishes
+each result to a public URL you can share:
+
+```bash
+bara generate create gpt_image_2 --prompt "a red bicycle" --wait --upload litterbox
+```
+
+```
+saved /Users/you/bara-output/openai-1753...-1.png
+url   https://litter.catbox.moe/ab12cd.png
+```
+
+Uploading is **off by default** — nothing leaves your machine until you choose a
+backend. Make it automatic:
+
+```bash
+bara settings set upload_backend s3
+bara generate create flux_dev --prompt "..." --wait     # every result now gets a URL
+bara generate create flux_dev --prompt "..." --no-upload  # opt out for one run
+```
+
+| Backend | Account | Retention | Notes |
+|---|---|---|---|
+| `s3` | yours | you decide | Cloudflare R2, AWS S3, Backblaze B2, MinIO — **the durable option** |
+| `litterbox` | none | 1h–72h | zero setup, good for a quick share |
+| `catbox` | none | permanent | public; the service pauses uploads periodically |
+
+Run `bara upload backends` to see which is active.
+
+**Cloudflare R2** is the recommended target: 10 GB free indefinitely and no
+egress fees. Create a bucket, enable its public `r2.dev` URL, make an S3 API
+token, then:
+
+```bash
+bara settings set upload_backend s3
+bara settings set s3_endpoint https://<account-id>.r2.cloudflarestorage.com
+bara settings set s3_bucket my-renders
+bara settings set s3_region auto
+bara settings set s3_access_key_id --stdin
+bara settings set s3_secret_access_key --stdin
+bara settings set upload_base_url https://pub-<hash>.r2.dev
+```
+
+`upload_base_url` is what gets prepended to the object key to build the returned
+link, so point it at whatever domain actually serves the bucket. Objects are
+keyed `<prefix>/YYYY/MM/DD/<name>` so the bucket stays browsable.
+
+Upload files on their own with `bara upload create ./a.png ./b.png`.
+
+Configuring a backend also changes how **local media inputs** are sent: instead
+of being inlined as a data URI, they are uploaded and passed by URL, which
+removes the 20 MB inline ceiling.
 
 ### Async jobs
 
@@ -208,7 +267,9 @@ bara mcp config                      # prints a client config snippet
 claude mcp add bara -- bara mcp serve
 ```
 
-Tools: `list_models`, `get_model`, `generate`, `get_job`, `list_jobs`.
+Tools: `list_models`, `get_model`, `generate`, `get_job`, `list_jobs`, `upload_file`.
+
+Pass `upload: true` to `generate` to get a public URL back instead of only a path.
 
 Transport is newline-delimited JSON-RPC 2.0 over stdio. Tool failures come back
 in-band (`isError: true`) so the model can correct itself rather than seeing a
@@ -221,13 +282,15 @@ transport error.
 | `bara settings` | list / get / set / unset API keys and preferences |
 | `bara model` | list models, inspect a parameter schema |
 | `bara generate` | create / cost / get / list / wait / cancel jobs |
+| `bara upload` | publish files to a public URL, list backends |
 | `bara mcp` | run the MCP server, print client config |
 | `bara version` | build info |
 
 Global flags: `--json`, `--no-color`.
 
 `generate create` flags: `--wait`, `--wait-timeout` (default `10m`),
-`--wait-interval` (default `3s`), `--out`, `--quiet`, `--no-save`, `--json`.
+`--wait-interval` (default `3s`), `--out`, `--quiet`, `--no-save`, `--json`,
+`--upload [backend]`, `--no-upload`.
 
 ## How it works
 
@@ -241,6 +304,7 @@ bara generate create <model> --param value
         |     runpod       POST /v2/<endpoint>/run, poll /v2/<endpoint>/status/<id>
         +-- jobs           record the job locally so get/list/wait work on an id
         +-- output         decode base64 or download the URL into the output dir
+        +-- uploader       optional: republish to a durable URL (s3/R2, litterbox, catbox)
 ```
 
 Parameters are validated **before** the request goes out, so a typo costs

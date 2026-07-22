@@ -48,6 +48,9 @@ type Output struct {
 	Ext string `json:"ext,omitempty"`
 	// LocalPath is filled in once the CLI writes the artifact to disk.
 	LocalPath string `json:"local_path,omitempty"`
+	// PublicURL is set once the artifact has been republished to a durable
+	// URL. Unlike URL, it does not expire out from under you.
+	PublicURL string `json:"public_url,omitempty"`
 }
 
 // Job is a normalized generation job.

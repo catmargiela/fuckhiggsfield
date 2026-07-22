@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -36,14 +37,39 @@ type Config struct {
 	OpenAIBaseURL string `json:"openai_base_url,omitempty"`
 	// RunPodBaseURL overrides the RunPod public-endpoint base.
 	RunPodBaseURL string `json:"runpod_base_url,omitempty"`
-	// UploadBaseURL is an optional public base URL for the upload bucket.
+
+	// UploadBackend selects where artifacts are published: none, catbox,
+	// litterbox, or s3. Empty means none.
+	UploadBackend string `json:"upload_backend,omitempty"`
+	// UploadBaseURL is the public base URL objects are served from (s3).
 	UploadBaseURL string `json:"upload_base_url,omitempty"`
+	// LitterboxTime is the retention window: 1h, 12h, 24h, or 72h.
+	LitterboxTime string `json:"litterbox_time,omitempty"`
+
+	// S3-compatible bucket settings (Cloudflare R2, AWS S3, B2, MinIO).
+	S3Endpoint  string `json:"s3_endpoint,omitempty"`
+	S3Bucket    string `json:"s3_bucket,omitempty"`
+	S3Region    string `json:"s3_region,omitempty"`
+	S3Prefix    string `json:"s3_prefix,omitempty"`
+	S3PathStyle *bool  `json:"s3_path_style,omitempty"`
+}
+
+// S3UsePathStyle reports whether to address the bucket as a path segment.
+// Path style is the default because R2, B2, and MinIO all require it.
+func (c *Config) S3UsePathStyle() bool {
+	if c.S3PathStyle == nil {
+		return true
+	}
+	return *c.S3PathStyle
 }
 
 // Credentials holds secrets. Persisted with 0600.
 type Credentials struct {
-	OpenAIAPIKey string `json:"openai_api_key,omitempty"`
-	RunPodAPIKey string `json:"runpod_api_key,omitempty"`
+	OpenAIAPIKey   string `json:"openai_api_key,omitempty"`
+	RunPodAPIKey   string `json:"runpod_api_key,omitempty"`
+	S3AccessKey    string `json:"s3_access_key_id,omitempty"`
+	S3SecretKey    string `json:"s3_secret_access_key,omitempty"`
+	CatboxUserHash string `json:"catbox_userhash,omitempty"`
 }
 
 const (
@@ -203,6 +229,13 @@ func LoadCredentials() (*Credentials, error) {
 	if v := firstNonEmpty(os.Getenv("BARA_RUNPOD_API_KEY"), os.Getenv("RUNPOD_API_KEY")); v != "" {
 		cr.RunPodAPIKey = v
 	}
+	// AWS_* is honoured so an existing S3 profile works without re-entry.
+	if v := firstNonEmpty(os.Getenv("BARA_S3_ACCESS_KEY_ID"), os.Getenv("AWS_ACCESS_KEY_ID")); v != "" {
+		cr.S3AccessKey = v
+	}
+	if v := firstNonEmpty(os.Getenv("BARA_S3_SECRET_ACCESS_KEY"), os.Getenv("AWS_SECRET_ACCESS_KEY")); v != "" {
+		cr.S3SecretKey = v
+	}
 	return cr, nil
 }
 
@@ -249,7 +282,17 @@ func Settings() []Setting {
 		{Name: "default_image_model", Desc: "model used when none is given"},
 		{Name: "openai_base_url", Desc: "override the OpenAI API base URL"},
 		{Name: "runpod_base_url", Desc: "override the RunPod API base URL"},
-		{Name: "upload_base_url", Desc: "public base URL for uploaded files"},
+		{Name: "upload_backend", Desc: "publish outputs to a URL: none, catbox, litterbox, s3"},
+		{Name: "upload_base_url", Desc: "public base URL objects are served from (s3)"},
+		{Name: "litterbox_time", Desc: "litterbox retention: 1h, 12h, 24h, 72h"},
+		{Name: "catbox_userhash", Secret: true, Desc: "catbox account hash (optional; uploads are anonymous without it)"},
+		{Name: "s3_endpoint", Desc: "S3 API endpoint, e.g. https://<account>.r2.cloudflarestorage.com"},
+		{Name: "s3_bucket", Desc: "bucket name"},
+		{Name: "s3_region", Desc: "region (use 'auto' for Cloudflare R2)"},
+		{Name: "s3_prefix", Desc: "key prefix inside the bucket"},
+		{Name: "s3_path_style", Desc: "address the bucket as a path segment (true for R2/B2/MinIO)"},
+		{Name: "s3_access_key_id", Secret: true, Desc: "S3 access key id"},
+		{Name: "s3_secret_access_key", Secret: true, Desc: "S3 secret access key"},
 	}
 	sort.Slice(s, func(i, j int) bool { return s[i].Name < s[j].Name })
 	return s
@@ -271,8 +314,31 @@ func Get(cfg *Config, cr *Credentials, name string) (string, error) {
 		return cfg.OpenAIBaseURL, nil
 	case "runpod_base_url":
 		return cfg.RunPodBaseURL, nil
+	case "upload_backend":
+		return cfg.UploadBackend, nil
 	case "upload_base_url":
 		return cfg.UploadBaseURL, nil
+	case "litterbox_time":
+		return cfg.LitterboxTime, nil
+	case "catbox_userhash":
+		return cr.CatboxUserHash, nil
+	case "s3_endpoint":
+		return cfg.S3Endpoint, nil
+	case "s3_bucket":
+		return cfg.S3Bucket, nil
+	case "s3_region":
+		return cfg.S3Region, nil
+	case "s3_prefix":
+		return cfg.S3Prefix, nil
+	case "s3_path_style":
+		if cfg.S3PathStyle == nil {
+			return "", nil
+		}
+		return strconv.FormatBool(*cfg.S3PathStyle), nil
+	case "s3_access_key_id":
+		return cr.S3AccessKey, nil
+	case "s3_secret_access_key":
+		return cr.S3SecretKey, nil
 	}
 	return "", fmt.Errorf("unknown setting %q (run `bara settings list`)", name)
 }
@@ -295,12 +361,65 @@ func Set(cfg *Config, cr *Credentials, name, value string) (secret bool, err err
 		cfg.OpenAIBaseURL = value
 	case "runpod_base_url":
 		cfg.RunPodBaseURL = value
+	case "upload_backend":
+		if value != "" && !validBackend(value) {
+			return false, fmt.Errorf("upload_backend must be one of: none, catbox, litterbox, s3 (got %q)", value)
+		}
+		cfg.UploadBackend = value
 	case "upload_base_url":
 		cfg.UploadBaseURL = value
+	case "litterbox_time":
+		if value != "" && !validLitterboxTime(value) {
+			return false, fmt.Errorf("litterbox_time must be one of: 1h, 12h, 24h, 72h (got %q)", value)
+		}
+		cfg.LitterboxTime = value
+	case "catbox_userhash":
+		cr.CatboxUserHash = value
+		return true, nil
+	case "s3_endpoint":
+		cfg.S3Endpoint = value
+	case "s3_bucket":
+		cfg.S3Bucket = value
+	case "s3_region":
+		cfg.S3Region = value
+	case "s3_prefix":
+		cfg.S3Prefix = value
+	case "s3_path_style":
+		if value == "" {
+			cfg.S3PathStyle = nil
+			break
+		}
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return false, fmt.Errorf("s3_path_style expects true or false (got %q)", value)
+		}
+		cfg.S3PathStyle = &b
+	case "s3_access_key_id":
+		cr.S3AccessKey = value
+		return true, nil
+	case "s3_secret_access_key":
+		cr.S3SecretKey = value
+		return true, nil
 	default:
 		return false, fmt.Errorf("unknown setting %q (run `bara settings list`)", name)
 	}
 	return false, nil
+}
+
+func validBackend(v string) bool {
+	switch v {
+	case "none", "catbox", "litterbox", "s3":
+		return true
+	}
+	return false
+}
+
+func validLitterboxTime(v string) bool {
+	switch v {
+	case "1h", "12h", "24h", "72h":
+		return true
+	}
+	return false
 }
 
 // Mask renders a secret as a short prefix plus a fixed tail, so users can tell

@@ -16,6 +16,7 @@ import (
 	"github.com/catmargiela/fuckhiggsfield/internal/media"
 	"github.com/catmargiela/fuckhiggsfield/internal/provider"
 	"github.com/catmargiela/fuckhiggsfield/internal/render"
+	"github.com/catmargiela/fuckhiggsfield/internal/uploader"
 )
 
 func newGenerateCmd(app *App) *cobra.Command {
@@ -46,6 +47,8 @@ type createOpts struct {
 	noSave   bool
 	json     bool
 	help     bool
+	upload   string
+	noUpload bool
 }
 
 func newGenerateCreateCmd(app *App) *cobra.Command {
@@ -57,7 +60,9 @@ func newGenerateCreateCmd(app *App) *cobra.Command {
 			"to see what a model accepts. Media parameters take a local file path or a\n" +
 			"URL — local files are inlined automatically.\n\n" +
 			"Control flags: --wait, --wait-timeout, --wait-interval, --out, --quiet,\n" +
-			"--no-save, --json.",
+			"--no-save, --json, --upload [backend], --no-upload.\n\n" +
+			"--upload republishes each result to a public URL (see `bara upload backends`).\n" +
+			"It also applies to local media inputs, which lifts the inline size limit.",
 		Example: "  bara generate create gpt_image_2 --prompt \"a cat in a spaceship\" --wait\n" +
 			"  bara generate create flux_dev --prompt \"golden hour city\" --width 1280 --height 720 --wait\n" +
 			"  bara generate create qwen_image_edit --prompt \"make it snow\" --image ./photo.png --wait\n" +
@@ -186,6 +191,17 @@ func parseParams(m catalog.Model, args []string, opts *createOpts) (map[string]a
 		case "no_save":
 			opts.noSave = true
 			continue
+		case "upload":
+			// Bare --upload means "use the configured backend".
+			if v, ok := next(); ok {
+				opts.upload = v
+			} else {
+				opts.upload = "-"
+			}
+			continue
+		case "no_upload":
+			opts.noUpload = true
+			continue
 		case "json":
 			opts.json = true
 			continue
@@ -283,10 +299,28 @@ func runCreate(ctx context.Context, app *App, m catalog.Model, values map[string
 	}
 	values = catalog.ApplyDefaults(m, values)
 
-	// RunPod fetches media by URL, so local paths must be inlined first.
+	var up uploader.Uploader
+	if !opts.noUpload {
+		override := opts.upload
+		if override == "-" {
+			// Bare --upload: fall back to the configured backend, and if none
+			// is set, say so rather than silently doing nothing.
+			override = ""
+			if app.Cfg.UploadBackend == "" || app.Cfg.UploadBackend == uploader.BackendNone {
+				return fmt.Errorf("--upload needs a backend: pass one (--upload catbox) or set a default with `bara settings set upload_backend <name>`\n\nRun `bara upload backends` to see the options")
+			}
+		}
+		var err error
+		up, err = app.Uploader(override)
+		if err != nil {
+			return err
+		}
+	}
+
+	// RunPod fetches media by URL, so local paths must be resolved first.
 	// OpenAI takes multipart uploads, so its provider handles paths directly.
 	if m.Provider == "runpod" {
-		if err := resolveMediaParams(m, values); err != nil {
+		if err := resolveMediaParams(cmdContext(ctx), m, values, up); err != nil {
 			return err
 		}
 	}
@@ -324,6 +358,14 @@ func runCreate(ctx context.Context, app *App, m catalog.Model, values map[string
 		if err := saveOutputs(ctx, app, job, opts.outDir); err != nil {
 			return err
 		}
+		if up != nil {
+			if err := uploadOutputs(ctx, up, job); err != nil {
+				return err
+			}
+			if !opts.quiet && !app.JSON {
+				fmt.Fprintf(app.Err, "%s\n", render.Dim("published via "+up.Describe()))
+			}
+		}
 		store.Put(job)
 		if err := store.Save(); err != nil {
 			return err
@@ -332,7 +374,23 @@ func runCreate(ctx context.Context, app *App, m catalog.Model, values map[string
 	return printJob(app, job, opts.quiet)
 }
 
-func resolveMediaParams(m catalog.Model, values map[string]any) error {
+func cmdContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// resolveMediaParams turns local paths into something RunPod can fetch. With an
+// uploader configured the file is published and referenced by URL, which avoids
+// the size ceiling that inline data URIs impose.
+func resolveMediaParams(ctx context.Context, m catalog.Model, values map[string]any, up uploader.Uploader) error {
+	resolve := func(ref string) (string, error) {
+		if up == nil || media.IsURL(ref) {
+			return media.Resolve(ref)
+		}
+		return uploadPath(ctx, up, ref)
+	}
 	for _, p := range m.Params {
 		if p.Media == "" {
 			continue
@@ -343,18 +401,38 @@ func resolveMediaParams(m catalog.Model, values map[string]any) error {
 		}
 		switch t := v.(type) {
 		case string:
-			resolved, err := media.Resolve(t)
+			resolved, err := resolve(t)
 			if err != nil {
 				return fmt.Errorf("--%s: %w", p.Name, err)
 			}
 			values[p.Name] = resolved
 		case []string:
-			resolved, err := media.ResolveAll(t)
-			if err != nil {
-				return fmt.Errorf("--%s: %w", p.Name, err)
+			out := make([]string, 0, len(t))
+			for _, ref := range t {
+				resolved, err := resolve(ref)
+				if err != nil {
+					return fmt.Errorf("--%s: %w", p.Name, err)
+				}
+				out = append(out, resolved)
 			}
-			values[p.Name] = resolved
+			values[p.Name] = out
 		}
+	}
+	return nil
+}
+
+// uploadOutputs republishes each saved artifact to a durable URL.
+func uploadOutputs(ctx context.Context, up uploader.Uploader, job *provider.Job) error {
+	for i := range job.Outputs {
+		o := &job.Outputs[i]
+		if o.PublicURL != "" || o.LocalPath == "" {
+			continue
+		}
+		url, err := uploadPath(cmdContext(ctx), up, o.LocalPath)
+		if err != nil {
+			return err
+		}
+		o.PublicURL = url
 	}
 	return nil
 }
@@ -448,12 +526,17 @@ func printJob(app *App, job *provider.Job, quiet bool) error {
 		return render.JSON(app.Out, job)
 	}
 	if quiet {
+		// One line per artifact, most useful reference first, so the output
+		// pipes straight into another command.
 		for _, o := range job.Outputs {
-			if o.LocalPath != "" {
+			switch {
+			case o.PublicURL != "":
+				fmt.Fprintln(app.Out, o.PublicURL)
+			case o.LocalPath != "":
 				fmt.Fprintln(app.Out, o.LocalPath)
-			} else if o.URL != "" {
+			case o.URL != "":
 				fmt.Fprintln(app.Out, o.URL)
-			} else if o.Text != "" {
+			case o.Text != "":
 				fmt.Fprintln(app.Out, o.Text)
 			}
 		}
@@ -482,9 +565,15 @@ func printJob(app *App, job *provider.Job, quiet bool) error {
 			fmt.Fprintln(app.Out, o.Text)
 		case o.LocalPath != "":
 			fmt.Fprintf(app.Out, "%s %s\n", render.Bold("saved"), o.LocalPath)
-			if o.URL != "" {
-				fmt.Fprintf(app.Out, "%s %s\n", render.Dim("  url"), render.Dim(o.URL))
+			if o.PublicURL != "" {
+				fmt.Fprintf(app.Out, "%s  %s\n", render.Bold("url"), render.Cyan(o.PublicURL))
 			}
+			if o.URL != "" {
+				// The provider's own link, which typically expires.
+				fmt.Fprintf(app.Out, "%s %s\n", render.Dim("  src"), render.Dim(o.URL))
+			}
+		case o.PublicURL != "":
+			fmt.Fprintln(app.Out, o.PublicURL)
 		case o.URL != "":
 			fmt.Fprintln(app.Out, o.URL)
 		}
@@ -561,7 +650,10 @@ func newGenerateListCmd(app *App) *cobra.Command {
 			for _, j := range list {
 				out := ""
 				if len(j.Outputs) > 0 {
-					out = j.Outputs[0].LocalPath
+					out = j.Outputs[0].PublicURL
+					if out == "" {
+						out = j.Outputs[0].LocalPath
+					}
 					if out == "" {
 						out = j.Outputs[0].URL
 					}
