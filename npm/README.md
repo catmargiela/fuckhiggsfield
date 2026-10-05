@@ -1,7 +1,7 @@
 # @catmargiela/bara
 
-Generate images, video, audio, and text from the terminal using your own OpenAI
-and RunPod API keys.
+Generate images with GPT Image 2 from the terminal using your own OpenAI API
+key, and get every result back as a catbox.moe link.
 
 ## Install
 
@@ -19,7 +19,7 @@ Supported: macOS, Linux, Windows on x64 and arm64.
 
 ```bash
 bara settings set openai_api_key --stdin
-bara model list --image
+bara model get gpt_image_2
 bara generate create gpt_image_2 --prompt "a cat in a spaceship" --wait
 bara --help
 ```

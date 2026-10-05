@@ -1,5 +1,5 @@
-// Command bara generates images, video, audio, and text from the terminal
-// using your own OpenAI and RunPod API keys.
+// Command bara generates images with GPT Image 2 from the terminal using your
+// own OpenAI API key.
 package main
 
 import (

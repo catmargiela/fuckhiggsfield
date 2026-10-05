@@ -112,7 +112,7 @@ func TestToolsListAdvertisesSchemas(t *testing.T) {
 func TestCallListModels(t *testing.T) {
 	s, out := newTestServer(t)
 	got := roundTrip(t, s, out,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_models","arguments":{"kind":"image","provider":"openai"}}}`)
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_models","arguments":{"query":"gpt"}}}`)
 	res := got[0]["result"].(map[string]any)
 	if res["isError"] == true {
 		t.Fatalf("tool call failed: %#v", res)

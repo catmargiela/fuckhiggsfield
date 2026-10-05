@@ -19,8 +19,8 @@ func newSettingsCmd(app *App) *cobra.Command {
 		Short:   "Store API keys and preferences",
 		Long: "Read and write bara settings.\n\n" +
 			"API keys live in credentials.json with 0600 permissions; everything else\n" +
-			"lives in config.json. Environment variables (OPENAI_API_KEY, RUNPOD_API_KEY,\n" +
-			"BARA_*) override the files without writing to disk.",
+			"lives in config.json. Environment variables (OPENAI_API_KEY, BARA_*)\n" +
+			"override the files without writing to disk.",
 	}
 	c.AddCommand(
 		newSettingsListCmd(app),
@@ -121,7 +121,7 @@ func newSettingsSetCmd(app *App) *cobra.Command {
 			"Omit the value (or pass --stdin) to read it from standard input, which keeps\n" +
 			"API keys out of your shell history.",
 		Args:    cobra.RangeArgs(1, 2),
-		Example: "  bara settings set openai_api_key sk-...\n  bara settings set runpod_api_key --stdin\n  bara settings set output_dir ~/renders",
+		Example: "  bara settings set openai_api_key --stdin\n  bara settings set upload_backend none\n  bara settings set output_dir ~/renders",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := app.Load(); err != nil {
 				return err

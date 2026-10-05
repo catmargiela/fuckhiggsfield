@@ -15,15 +15,13 @@ func isolate(t *testing.T) string {
 	t.Setenv("BARA_CONFIG_PATH", "")
 	t.Setenv("BARA_CREDENTIALS_PATH", "")
 	t.Setenv("OPENAI_API_KEY", "")
-	t.Setenv("RUNPOD_API_KEY", "")
 	t.Setenv("BARA_OPENAI_API_KEY", "")
-	t.Setenv("BARA_RUNPOD_API_KEY", "")
 	return dir
 }
 
 func TestCredentialsRoundTrip(t *testing.T) {
 	isolate(t)
-	cr := &Credentials{OpenAIAPIKey: "sk-abc", RunPodAPIKey: "rp-xyz"}
+	cr := &Credentials{OpenAIAPIKey: "sk-abc", CatboxUserHash: "hash"}
 	if err := cr.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -31,7 +29,7 @@ func TestCredentialsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCredentials: %v", err)
 	}
-	if got.OpenAIAPIKey != "sk-abc" || got.RunPodAPIKey != "rp-xyz" {
+	if got.OpenAIAPIKey != "sk-abc" || got.CatboxUserHash != "hash" {
 		t.Fatalf("round trip lost keys: %+v", got)
 	}
 }
@@ -93,11 +91,57 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.OpenAIBaseURL != DefaultOpenAIBaseURL {
 		t.Errorf("openai base = %q", cfg.OpenAIBaseURL)
 	}
-	if cfg.RunPodBaseURL != DefaultRunPodBaseURL {
-		t.Errorf("runpod base = %q", cfg.RunPodBaseURL)
+	if got := cfg.EffectiveUploadBackend(); got != "catbox" {
+		t.Errorf("upload backend = %q, want catbox", got)
 	}
 	if cfg.OutputDir == "" {
 		t.Error("output dir should default to something")
+	}
+}
+
+// Opting out with none must survive a reload instead of snapping back to the
+// default backend.
+func TestExplicitNoneUploadBackendIsKept(t *testing.T) {
+	isolate(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Set(cfg, &Credentials{}, "upload_backend", "none"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EffectiveUploadBackend() != "none" {
+		t.Fatalf("upload backend = %q, want none", got.EffectiveUploadBackend())
+	}
+}
+
+// Saving any setting must not freeze the default backend into config.json,
+// or unsetting upload_backend later would no longer restore the default.
+func TestSaveDoesNotPersistDefaultUploadBackend(t *testing.T) {
+	dir := isolate(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Set(cfg, &Credentials{}, "default_image_model", "gpt_image_2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "upload_backend") {
+		t.Fatalf("config.json persisted the default backend: %s", b)
 	}
 }
 
@@ -131,9 +175,8 @@ func TestKeyForReportsHowToFix(t *testing.T) {
 	if !strings.Contains(err.Error(), "settings set openai_api_key") {
 		t.Errorf("error should name the fix, got %q", err.Error())
 	}
-	_, err = cr.KeyFor(ProviderRunPod)
-	if err == nil || !strings.Contains(err.Error(), "runpod_api_key") {
-		t.Errorf("runpod error = %v", err)
+	if _, err := cr.KeyFor(Provider("runpod")); err == nil {
+		t.Error("expected an error for a provider that no longer exists")
 	}
 }
 

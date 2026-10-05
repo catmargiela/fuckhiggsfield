@@ -20,9 +20,9 @@ func newUploadCmd(app *App) *cobra.Command {
 		Use:   "upload",
 		Short: "Publish files to a public URL",
 		Long: "Publish local files to a public URL.\n\n" +
-			"Uploading is off by default. Pick a backend with\n" +
-			"`bara settings set upload_backend <name>`, or force one per command\n" +
-			"with --backend. Run `bara upload backends` to see the options.",
+			"Files go to catbox.moe unless another backend is set with\n" +
+			"`bara settings set upload_backend <name>` (none disables uploading), or\n" +
+			"forced per command with --backend. Run `bara upload backends` to see the options.",
 	}
 	c.AddCommand(newUploadFileCmd(app), newUploadBackendsCmd(app))
 	return c
@@ -38,10 +38,7 @@ func newUploadBackendsCmd(app *App) *cobra.Command {
 			if err := app.Load(); err != nil {
 				return err
 			}
-			current := app.Cfg.UploadBackend
-			if current == "" {
-				current = uploader.BackendNone
-			}
+			current := app.Cfg.EffectiveUploadBackend()
 			if app.JSON {
 				var out []map[string]string
 				for _, b := range uploader.Backends() {

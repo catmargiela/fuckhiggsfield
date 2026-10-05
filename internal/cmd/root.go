@@ -14,7 +14,6 @@ import (
 	"github.com/catmargiela/fuckhiggsfield/internal/config"
 	"github.com/catmargiela/fuckhiggsfield/internal/provider"
 	"github.com/catmargiela/fuckhiggsfield/internal/provider/openai"
-	"github.com/catmargiela/fuckhiggsfield/internal/provider/runpod"
 	"github.com/catmargiela/fuckhiggsfield/internal/render"
 	"github.com/catmargiela/fuckhiggsfield/internal/uploader"
 )
@@ -70,28 +69,18 @@ func (a *App) Load() error {
 
 // ProviderFor returns a ready client for the model's backend.
 func (a *App) ProviderFor(m catalog.Model) (provider.Provider, error) {
-	switch config.Provider(m.Provider) {
-	case config.ProviderOpenAI:
-		key, err := a.Creds.KeyFor(config.ProviderOpenAI)
-		if err != nil {
-			return nil, err
-		}
-		return openai.New(a.Cfg.OpenAIBaseURL, key, a.HTTP), nil
-	case config.ProviderRunPod:
-		key, err := a.Creds.KeyFor(config.ProviderRunPod)
-		if err != nil {
-			return nil, err
-		}
-		return runpod.New(a.Cfg.RunPodBaseURL, key, a.HTTP), nil
+	p, err := a.ProviderByName(m.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("model %s: %w", m.ID, err)
 	}
-	return nil, fmt.Errorf("model %s has unknown provider %q", m.ID, m.Provider)
+	return p, nil
 }
 
 // Uploader builds the configured uploader. It returns (nil, nil) when
-// uploading is disabled, which is the default. Passing override forces a
+// uploading is disabled with upload_backend none. Passing override forces a
 // backend for a single command.
 func (a *App) Uploader(override string) (uploader.Uploader, error) {
-	backend := a.Cfg.UploadBackend
+	backend := a.Cfg.EffectiveUploadBackend()
 	if override != "" {
 		backend = override
 	}
@@ -121,12 +110,6 @@ func (a *App) ProviderByName(name string) (provider.Provider, error) {
 			return nil, err
 		}
 		return openai.New(a.Cfg.OpenAIBaseURL, key, a.HTTP), nil
-	case config.ProviderRunPod:
-		key, err := a.Creds.KeyFor(config.ProviderRunPod)
-		if err != nil {
-			return nil, err
-		}
-		return runpod.New(a.Cfg.RunPodBaseURL, key, a.HTTP), nil
 	}
 	return nil, fmt.Errorf("unknown provider %q", name)
 }
@@ -138,14 +121,14 @@ func NewRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "bara",
 		Aliases: []string{"br"},
-		Short:   "Generate images, video, and audio from the terminal with your own API keys",
-		Long: "Run image, video, audio, and text generation from the terminal.\n\n" +
-			"Models are served by OpenAI (gpt-image-*) and RunPod Public Endpoints,\n" +
-			"billed directly to the API keys you configure with `bara settings set`.",
+		Short:   "Generate images with GPT Image 2 from the terminal with your own API key",
+		Long: "Run image generation from the terminal.\n\n" +
+			"Images are made by OpenAI's gpt-image-2, billed directly to the API key\n" +
+			"you configure with `bara settings set`, and published to catbox.moe so\n" +
+			"every result comes back with a link.",
 		Example: "  bara settings set openai_api_key sk-...\n" +
-			"  bara model list --image\n" +
 			"  bara generate create gpt_image_2 --prompt \"a cat in a spaceship\" --wait\n" +
-			"  bara generate create flux_dev --prompt \"a quiet beach at sunrise\" --wait",
+			"  bara generate create gpt_image_2 --prompt \"make it snow\" --image ./photo.png --wait",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       Version,

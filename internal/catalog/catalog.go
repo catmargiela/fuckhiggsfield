@@ -72,12 +72,11 @@ type Model struct {
 	ID string `json:"id"`
 	// Name is the human label.
 	Name string `json:"name"`
-	// Provider routes the request: "openai" or "runpod".
+	// Provider routes the request: "openai".
 	Provider string `json:"provider"`
 	// Kind is the output media class.
 	Kind Kind `json:"kind"`
-	// Endpoint is the provider-side identifier. For RunPod it is the slug in
-	// https://api.runpod.ai/v2/<endpoint>/run; for OpenAI it is the model id.
+	// Endpoint is the provider-side identifier: the OpenAI model id.
 	Endpoint string `json:"endpoint"`
 	// Price is a human-readable pricing note straight from the provider docs.
 	Price string `json:"price,omitempty"`

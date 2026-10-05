@@ -1,8 +1,8 @@
 // Package jobs keeps a local record of submitted generations.
 //
-// RunPod jobs are polled by (endpoint, id), and OpenAI jobs are synchronous
-// and unfetchable. Both need somewhere local to live so `generate list`,
-// `generate get`, and `generate wait` work against a plain job id.
+// OpenAI image jobs are synchronous and cannot be fetched again, so they need
+// somewhere local to live for `generate list` and `generate get` to work
+// against a plain job id.
 package jobs
 
 import (
@@ -20,6 +20,11 @@ import (
 
 // MaxEntries bounds the store so it cannot grow without limit.
 const MaxEntries = 500
+
+// MaxRawBytes caps the provider response kept per job. Older versions stored
+// whole OpenAI responses, base64 image included, which grew the store to tens
+// of megabytes; anything above the cap is dropped on load and on insert.
+const MaxRawBytes = 64 << 10
 
 // Store is a append-mostly list of jobs on disk.
 type Store struct {
@@ -58,6 +63,9 @@ func Open() (*Store, error) {
 	if err := json.Unmarshal(b, s); err != nil {
 		return nil, fmt.Errorf("parse job store %s: %w", p, err)
 	}
+	for _, j := range s.Jobs {
+		trimRaw(j)
+	}
 	return s, nil
 }
 
@@ -87,6 +95,7 @@ func (s *Store) Save() error {
 
 // Put inserts or replaces a job by id.
 func (s *Store) Put(j *provider.Job) {
+	trimRaw(j)
 	for i, existing := range s.Jobs {
 		if existing.ID == j.ID {
 			// Keep the original submit time; it is the useful ordering key.
@@ -107,6 +116,12 @@ func (s *Store) Put(j *provider.Job) {
 		}
 	}
 	s.Jobs = append(s.Jobs, j)
+}
+
+func trimRaw(j *provider.Job) {
+	if len(j.Raw) > MaxRawBytes {
+		j.Raw = nil
+	}
 }
 
 // Get finds a job by exact id, or by unique id prefix.

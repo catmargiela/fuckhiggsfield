@@ -39,6 +39,9 @@ func main() {
 	b.WriteString("## Index\n\n")
 	for _, k := range kinds {
 		models := c.Filter(k.kind, "", "")
+		if len(models) == 0 {
+			continue
+		}
 		fmt.Fprintf(&b, "### %s (%d)\n\n", k.title, len(models))
 		b.WriteString("| model | provider | name | price |\n|---|---|---|---|\n")
 		for _, m := range models {

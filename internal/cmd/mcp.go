@@ -30,7 +30,7 @@ func newMCPServeCmd(app *App) *cobra.Command {
 		Use:   "serve",
 		Short: "Serve MCP over stdio",
 		Long: "Serve MCP over stdio (newline-delimited JSON-RPC 2.0).\n\n" +
-			"Tools: list_models, get_model, generate, get_job, list_jobs.\n" +
+			"Tools: list_models, get_model, generate, get_job, list_jobs, upload_file.\n" +
 			"Nothing is written to stdout except protocol messages.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -50,7 +50,7 @@ func newMCPServeCmd(app *App) *cobra.Command {
 				Download: func(ctx context.Context, dir, name, ext, url string) (string, error) {
 					return media.Download(ctx, app.HTTP, dir, name, ext, url)
 				},
-				UploadBackend: app.Cfg.UploadBackend,
+				UploadBackend: app.Cfg.EffectiveUploadBackend(),
 				ServerName:    "bara",
 				ServerVersion: Version,
 			}

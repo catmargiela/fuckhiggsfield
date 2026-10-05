@@ -30,7 +30,7 @@ func newModelListCmd(app *App) *cobra.Command {
 		Aliases: []string{"ls"},
 		Short:   "List available models",
 		Args:    cobra.NoArgs,
-		Example: "  bara model list\n  bara model list --image\n  bara model list --provider runpod --query wan",
+		Example: "  bara model list\n  bara model list --query gpt",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := app.Load(); err != nil {
 				return err
@@ -77,7 +77,7 @@ func newModelListCmd(app *App) *cobra.Command {
 	c.Flags().BoolVar(&video, "video", false, "only video models")
 	c.Flags().BoolVar(&audio, "audio", false, "only audio models")
 	c.Flags().BoolVar(&text, "text", false, "only text models")
-	c.Flags().StringVar(&providerFlag, "provider", "", "filter by provider (openai, runpod)")
+	c.Flags().StringVar(&providerFlag, "provider", "", "filter by provider (openai)")
 	c.Flags().StringVar(&query, "query", "", "substring match on id or name")
 	return c
 }
@@ -87,7 +87,7 @@ func newModelGetCmd(app *App) *cobra.Command {
 		Use:     "get <model>",
 		Short:   "Show a model's parameter schema",
 		Args:    cobra.ExactArgs(1),
-		Example: "  bara model get gpt_image_2\n  bara model get wan_2_6_i2v --json",
+		Example: "  bara model get gpt_image_2\n  bara model get gpt_image_2 --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := app.Load(); err != nil {
 				return err

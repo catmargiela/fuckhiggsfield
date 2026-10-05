@@ -24,7 +24,6 @@ type Provider string
 
 const (
 	ProviderOpenAI Provider = "openai"
-	ProviderRunPod Provider = "runpod"
 )
 
 // Config holds non-secret preferences.
@@ -35,11 +34,9 @@ type Config struct {
 	DefaultImageModel string `json:"default_image_model,omitempty"`
 	// OpenAIBaseURL overrides the OpenAI API base (for proxies/gateways).
 	OpenAIBaseURL string `json:"openai_base_url,omitempty"`
-	// RunPodBaseURL overrides the RunPod public-endpoint base.
-	RunPodBaseURL string `json:"runpod_base_url,omitempty"`
 
 	// UploadBackend selects where artifacts are published: none, catbox,
-	// litterbox, or s3. Empty means none.
+	// litterbox, or s3. Empty means DefaultUploadBackend.
 	UploadBackend string `json:"upload_backend,omitempty"`
 	// UploadBaseURL is the public base URL objects are served from (s3).
 	UploadBaseURL string `json:"upload_base_url,omitempty"`
@@ -54,6 +51,17 @@ type Config struct {
 	S3PathStyle *bool  `json:"s3_path_style,omitempty"`
 }
 
+// EffectiveUploadBackend is the backend in force: the configured one, or
+// DefaultUploadBackend when none is set. The default is resolved here rather
+// than in Load so that Save never writes it to disk, and `settings unset`
+// keeps meaning "back to the default".
+func (c *Config) EffectiveUploadBackend() string {
+	if c.UploadBackend == "" {
+		return DefaultUploadBackend
+	}
+	return c.UploadBackend
+}
+
 // S3UsePathStyle reports whether to address the bucket as a path segment.
 // Path style is the default because R2, B2, and MinIO all require it.
 func (c *Config) S3UsePathStyle() bool {
@@ -66,7 +74,6 @@ func (c *Config) S3UsePathStyle() bool {
 // Credentials holds secrets. Persisted with 0600.
 type Credentials struct {
 	OpenAIAPIKey   string `json:"openai_api_key,omitempty"`
-	RunPodAPIKey   string `json:"runpod_api_key,omitempty"`
 	S3AccessKey    string `json:"s3_access_key_id,omitempty"`
 	S3SecretKey    string `json:"s3_secret_access_key,omitempty"`
 	CatboxUserHash string `json:"catbox_userhash,omitempty"`
@@ -75,8 +82,10 @@ type Credentials struct {
 const (
 	// DefaultOpenAIBaseURL is the public OpenAI API root.
 	DefaultOpenAIBaseURL = "https://api.openai.com/v1"
-	// DefaultRunPodBaseURL is the RunPod public-endpoints root.
-	DefaultRunPodBaseURL = "https://api.runpod.ai/v2"
+	// DefaultUploadBackend publishes outputs to catbox.moe, so every
+	// generation comes back with a link. Set upload_backend to none to keep
+	// outputs local only.
+	DefaultUploadBackend = "catbox"
 )
 
 // Dir returns the directory holding config and credentials.
@@ -184,14 +193,8 @@ func Load() (*Config, error) {
 	if v := os.Getenv("BARA_OPENAI_BASE_URL"); v != "" {
 		cfg.OpenAIBaseURL = v
 	}
-	if v := os.Getenv("BARA_RUNPOD_BASE_URL"); v != "" {
-		cfg.RunPodBaseURL = v
-	}
 	if cfg.OpenAIBaseURL == "" {
 		cfg.OpenAIBaseURL = DefaultOpenAIBaseURL
-	}
-	if cfg.RunPodBaseURL == "" {
-		cfg.RunPodBaseURL = DefaultRunPodBaseURL
 	}
 	if cfg.OutputDir == "" {
 		home, err := os.UserHomeDir()
@@ -226,9 +229,6 @@ func LoadCredentials() (*Credentials, error) {
 	if v := firstNonEmpty(os.Getenv("BARA_OPENAI_API_KEY"), os.Getenv("OPENAI_API_KEY")); v != "" {
 		cr.OpenAIAPIKey = v
 	}
-	if v := firstNonEmpty(os.Getenv("BARA_RUNPOD_API_KEY"), os.Getenv("RUNPOD_API_KEY")); v != "" {
-		cr.RunPodAPIKey = v
-	}
 	// AWS_* is honoured so an existing S3 profile works without re-entry.
 	if v := firstNonEmpty(os.Getenv("BARA_S3_ACCESS_KEY_ID"), os.Getenv("AWS_ACCESS_KEY_ID")); v != "" {
 		cr.S3AccessKey = v
@@ -257,11 +257,6 @@ func (c *Credentials) KeyFor(p Provider) (string, error) {
 			return "", errors.New("no OpenAI API key configured — run `bara settings set openai_api_key <key>` or export OPENAI_API_KEY")
 		}
 		return c.OpenAIAPIKey, nil
-	case ProviderRunPod:
-		if c.RunPodAPIKey == "" {
-			return "", errors.New("no RunPod API key configured — run `bara settings set runpod_api_key <key>` or export RUNPOD_API_KEY")
-		}
-		return c.RunPodAPIKey, nil
 	}
 	return "", fmt.Errorf("unknown provider %q", p)
 }
@@ -277,12 +272,10 @@ type Setting struct {
 func Settings() []Setting {
 	s := []Setting{
 		{Name: "openai_api_key", Secret: true, Desc: "OpenAI API key (gpt-image-* models)"},
-		{Name: "runpod_api_key", Secret: true, Desc: "RunPod API key (public endpoints)"},
 		{Name: "output_dir", Desc: "directory generated media is written to"},
 		{Name: "default_image_model", Desc: "model used when none is given"},
 		{Name: "openai_base_url", Desc: "override the OpenAI API base URL"},
-		{Name: "runpod_base_url", Desc: "override the RunPod API base URL"},
-		{Name: "upload_backend", Desc: "publish outputs to a URL: none, catbox, litterbox, s3"},
+		{Name: "upload_backend", Desc: "publish outputs to a URL: catbox (default), litterbox, s3, none"},
 		{Name: "upload_base_url", Desc: "public base URL objects are served from (s3)"},
 		{Name: "litterbox_time", Desc: "litterbox retention: 1h, 12h, 24h, 72h"},
 		{Name: "catbox_userhash", Secret: true, Desc: "catbox account hash (optional; uploads are anonymous without it)"},
@@ -304,16 +297,12 @@ func Get(cfg *Config, cr *Credentials, name string) (string, error) {
 	switch name {
 	case "openai_api_key":
 		return cr.OpenAIAPIKey, nil
-	case "runpod_api_key":
-		return cr.RunPodAPIKey, nil
 	case "output_dir":
 		return cfg.OutputDir, nil
 	case "default_image_model":
 		return cfg.DefaultImageModel, nil
 	case "openai_base_url":
 		return cfg.OpenAIBaseURL, nil
-	case "runpod_base_url":
-		return cfg.RunPodBaseURL, nil
 	case "upload_backend":
 		return cfg.UploadBackend, nil
 	case "upload_base_url":
@@ -350,17 +339,12 @@ func Set(cfg *Config, cr *Credentials, name, value string) (secret bool, err err
 	case "openai_api_key":
 		cr.OpenAIAPIKey = value
 		return true, nil
-	case "runpod_api_key":
-		cr.RunPodAPIKey = value
-		return true, nil
 	case "output_dir":
 		cfg.OutputDir = value
 	case "default_image_model":
 		cfg.DefaultImageModel = value
 	case "openai_base_url":
 		cfg.OpenAIBaseURL = value
-	case "runpod_base_url":
-		cfg.RunPodBaseURL = value
 	case "upload_backend":
 		if value != "" && !validBackend(value) {
 			return false, fmt.Errorf("upload_backend must be one of: none, catbox, litterbox, s3 (got %q)", value)

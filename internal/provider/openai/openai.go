@@ -91,7 +91,7 @@ func (c *Client) Create(ctx context.Context, m catalog.Model, params map[string]
 		Endpoint: m.Endpoint,
 		Status:   provider.StatusCompleted,
 		Created:  time.Now().UTC(),
-		Raw:      raw,
+		Raw:      redactImages(raw),
 	}
 	if ir.Error != nil && ir.Error.Message != "" {
 		job.Status = provider.StatusFailed
@@ -255,6 +255,35 @@ func attachFile(ctx context.Context, mw *multipart.Writer, field, ref string, hc
 	}
 	_, err = io.Copy(w, f)
 	return err
+}
+
+// redactImages returns the response with each b64_json payload replaced by its
+// size. The bytes live in the job outputs; keeping them in Raw as well bloats
+// the job store by megabytes per image. A response it cannot rewrite is
+// dropped rather than kept whole, for the same reason.
+func redactImages(raw []byte) json.RawMessage {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	data, ok := doc["data"].([]any)
+	if !ok {
+		return raw
+	}
+	for _, item := range data {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if b64, ok := entry["b64_json"].(string); ok && b64 != "" {
+			entry["b64_json"] = fmt.Sprintf("<%d base64 chars omitted>", len(b64))
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 func errMessage(raw []byte) string {

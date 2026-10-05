@@ -51,6 +51,9 @@ type Output struct {
 	// PublicURL is set once the artifact has been republished to a durable
 	// URL. Unlike URL, it does not expire out from under you.
 	PublicURL string `json:"public_url,omitempty"`
+	// UploadError explains why publishing failed. The artifact is still
+	// saved at LocalPath.
+	UploadError string `json:"upload_error,omitempty"`
 }
 
 // Job is a normalized generation job.
@@ -70,7 +73,7 @@ type Job struct {
 
 // Provider submits and polls generations for one backend.
 type Provider interface {
-	// Name is the registry provider key, e.g. "runpod".
+	// Name is the registry provider key, e.g. "openai".
 	Name() string
 	// Create submits a generation. Implementations that are synchronous
 	// return an already-terminal job.

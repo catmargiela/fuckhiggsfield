@@ -18,15 +18,15 @@ func load(t *testing.T) *Catalog {
 // generation time, after the user has already typed a prompt.
 func TestRegistryIsWellFormed(t *testing.T) {
 	c := load(t)
-	if len(c.All()) < 30 {
-		t.Fatalf("catalog has only %d models; expected the full registry", len(c.All()))
+	if len(c.All()) == 0 {
+		t.Fatal("catalog is empty")
 	}
 	for _, m := range c.All() {
 		if m.ID == "" || m.Name == "" || m.Endpoint == "" {
 			t.Errorf("%q: id, name, and endpoint are all required", m.ID)
 		}
 		switch m.Provider {
-		case "openai", "runpod":
+		case "openai":
 		default:
 			t.Errorf("%s: unknown provider %q", m.ID, m.Provider)
 		}
@@ -125,13 +125,14 @@ func TestGetUnknownModelSuggests(t *testing.T) {
 
 func TestFilterByKindAndProvider(t *testing.T) {
 	c := load(t)
-	for _, m := range c.Filter(KindVideo, "runpod", "") {
-		if m.Kind != KindVideo || m.Provider != "runpod" {
-			t.Errorf("filter leaked %s (%s/%s)", m.ID, m.Kind, m.Provider)
-		}
-	}
 	if len(c.Filter(KindImage, "openai", "")) == 0 {
 		t.Error("expected OpenAI image models")
+	}
+	if got := c.Filter(KindVideo, "", ""); len(got) != 0 {
+		t.Errorf("kind filter leaked %d model(s)", len(got))
+	}
+	if got := c.Filter("", "runpod", ""); len(got) != 0 {
+		t.Errorf("provider filter leaked %d model(s)", len(got))
 	}
 }
 
@@ -191,30 +192,13 @@ func TestApplyDefaultsDoesNotOverrideUserValues(t *testing.T) {
 	}
 }
 
-// Endpoint slugs are what the URL is built from, so a typo silently 404s.
+// The endpoint is the model id sent to OpenAI, so a typo silently 404s.
 func TestKnownEndpointSlugs(t *testing.T) {
-	c := load(t)
-	want := map[string]string{
-		"gpt_image_2":        "gpt-image-2",
-		"flux_dev":           "black-forest-labs-flux-1-dev",
-		"flux_schnell":       "black-forest-labs-flux-1-schnell",
-		"qwen_image":         "qwen-image-t2i",
-		"seedream_4_t2i":     "seedream-v4-t2i",
-		"wan_2_2_i2v":        "wan-2-2-i2v-720",
-		"sora_2_pro_i2v":     "sora-2-pro-i2v",
-		"granite_4":          "granite-4-0-h-small",
-		"z_image_turbo":      "z-image-turbo",
-		"infinitetalk":       "infinitetalk",
-		"nano_banana_2_edit": "google-nano-banana-2-edit",
+	m, err := load(t).Get("gpt_image_2")
+	if err != nil {
+		t.Fatalf("missing model gpt_image_2: %v", err)
 	}
-	for id, endpoint := range want {
-		m, err := c.Get(id)
-		if err != nil {
-			t.Errorf("missing model %s: %v", id, err)
-			continue
-		}
-		if m.Endpoint != endpoint {
-			t.Errorf("%s endpoint = %q, want %q", id, m.Endpoint, endpoint)
-		}
+	if m.Endpoint != "gpt-image-2" {
+		t.Errorf("gpt_image_2 endpoint = %q, want gpt-image-2", m.Endpoint)
 	}
 }

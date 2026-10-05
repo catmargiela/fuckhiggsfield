@@ -178,13 +178,11 @@ func (s *Server) tools() []toolDef {
 		{
 			Name:        "list_models",
 			Title:       "List models",
-			Description: "List available generation models. Filter by kind (image, video, audio, text), provider (openai, runpod), or a substring query.",
+			Description: "List available generation models, optionally filtered by a substring query.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"kind":     map[string]any{"type": "string", "enum": []string{"image", "video", "audio", "text"}},
-					"provider": map[string]any{"type": "string", "enum": []string{"openai", "runpod"}},
-					"query":    map[string]any{"type": "string", "description": "substring match on model id or name"},
+					"query": map[string]any{"type": "string", "description": "substring match on model id or name"},
 				},
 			},
 		},
@@ -201,8 +199,10 @@ func (s *Server) tools() []toolDef {
 		{
 			Name:  "generate",
 			Title: "Generate media",
-			Description: "Run a generation and wait for the result. Returns the saved file path(s) and any URLs. " +
-				"Call get_model first to learn a model's parameters. Media parameters accept a local path or a URL.",
+			Description: "Generate an image with gpt_image_2 and wait for the result. Each output has a local_path and, " +
+				"when publishing succeeds, a public_url" + uploadBackendNote(s.deps.UploadBackend) + "; " +
+				"a failed publish is reported in upload_error without failing the job. " +
+				"Call get_model first to learn the parameters. Media parameters accept a local path or a URL.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -213,8 +213,8 @@ func (s *Server) tools() []toolDef {
 						"description": "block until the job finishes",
 					},
 					"upload": map[string]any{
-						"type": "boolean", "default": false,
-						"description": "also publish each result to a public URL (requires an upload backend to be configured)",
+						"type": "boolean", "default": true,
+						"description": "publish each result to a public URL; set false to keep it local only",
 					},
 					"timeout_seconds": map[string]any{"type": "integer", "default": 600},
 				},
@@ -301,12 +301,11 @@ func (s *Server) dispatch(ctx context.Context, cp callParams) (any, error) {
 	switch cp.Name {
 	case "list_models":
 		var a struct {
-			Kind     string `json:"kind"`
-			Provider string `json:"provider"`
-			Query    string `json:"query"`
+			Query string `json:"query"`
 		}
+		// Every field is optional, so malformed arguments just mean no filter.
 		_ = json.Unmarshal(cp.Arguments, &a)
-		models := s.deps.Catalog.Filter(catalog.Kind(a.Kind), a.Provider, a.Query)
+		models := s.deps.Catalog.Filter("", "", a.Query)
 		out := make([]map[string]any, 0, len(models))
 		for _, m := range models {
 			out = append(out, map[string]any{
@@ -346,7 +345,7 @@ func (s *Server) dispatch(ctx context.Context, cp callParams) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return job, nil
+		return withoutRaw(job), nil
 
 	case "upload_file":
 		var a struct {
@@ -377,7 +376,12 @@ func (s *Server) dispatch(ctx context.Context, cp callParams) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"jobs": store.List(a.Status, a.Limit)}, nil
+		list := store.List(a.Status, a.Limit)
+		out := make([]*provider.Job, 0, len(list))
+		for _, j := range list {
+			out = append(out, withoutRaw(j))
+		}
+		return map[string]any{"jobs": out}, nil
 	}
 	return nil, fmt.Errorf("unknown tool %q", cp.Name)
 }
@@ -387,7 +391,7 @@ func (s *Server) toolGenerate(ctx context.Context, raw json.RawMessage) (any, er
 		Model          string         `json:"model"`
 		Params         map[string]any `json:"params"`
 		Wait           *bool          `json:"wait"`
-		Upload         bool           `json:"upload"`
+		Upload         *bool          `json:"upload"`
 		TimeoutSeconds int            `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -404,10 +408,14 @@ func (s *Server) toolGenerate(ctx context.Context, raw json.RawMessage) (any, er
 		return nil, err
 	}
 	values := catalog.ApplyDefaults(m, a.Params)
-	if m.Provider == "runpod" {
-		if err := resolveMedia(m, values); err != nil {
-			return nil, err
+	// Publishing is on whenever a backend is configured, unless the caller
+	// opts out; asking for it explicitly without a backend is an error.
+	upload := s.deps.Upload != nil
+	if a.Upload != nil {
+		if *a.Upload && s.deps.Upload == nil {
+			return nil, fmt.Errorf("upload was requested but upload_backend is none — run `bara settings set upload_backend catbox`")
 		}
+		upload = *a.Upload
 	}
 	p, err := s.deps.ProviderFor(m)
 	if err != nil {
@@ -480,65 +488,37 @@ func (s *Server) toolGenerate(ctx context.Context, raw json.RawMessage) (any, er
 				o.LocalPath = path
 			}
 		}
-		if a.Upload {
-			if s.deps.Upload == nil {
-				return nil, fmt.Errorf("upload was requested but no upload backend is configured — run `bara settings set upload_backend <name>`")
-			}
-			for i := range job.Outputs {
-				o := &job.Outputs[i]
-				if o.LocalPath == "" || o.PublicURL != "" {
-					continue
-				}
-				url, err := s.deps.Upload(ctx, o.LocalPath)
-				if err != nil {
-					return nil, err
-				}
-				o.PublicURL = url
-			}
+		if upload {
+			s.publishOutputs(ctx, job)
 		}
 		store.Put(job)
 		_ = store.Save()
 	}
-	return job, nil
+	return withoutRaw(job), nil
 }
 
-func resolveMedia(m catalog.Model, values map[string]any) error {
-	for _, p := range m.Params {
-		if p.Media == "" {
+// publishOutputs uploads each saved artifact. A failure is recorded on the
+// output instead of failing the call, so the agent still gets the local path
+// of an image that has already been paid for.
+func (s *Server) publishOutputs(ctx context.Context, job *provider.Job) {
+	for i := range job.Outputs {
+		o := &job.Outputs[i]
+		if o.LocalPath == "" || o.PublicURL != "" {
 			continue
 		}
-		v, ok := values[p.Name]
-		if !ok {
+		url, err := s.deps.Upload(ctx, o.LocalPath)
+		if err != nil {
+			o.UploadError = err.Error()
 			continue
 		}
-		switch t := v.(type) {
-		case string:
-			r, err := media.Resolve(t)
-			if err != nil {
-				return fmt.Errorf("%s: %w", p.Name, err)
-			}
-			values[p.Name] = r
-		case []any:
-			out := make([]string, 0, len(t))
-			for _, item := range t {
-				s, ok := item.(string)
-				if !ok {
-					continue
-				}
-				r, err := media.Resolve(s)
-				if err != nil {
-					return fmt.Errorf("%s: %w", p.Name, err)
-				}
-				out = append(out, r)
-			}
-			values[p.Name] = out
-		case []string:
-			out, err := media.ResolveAll(t)
-			if err != nil {
-				return fmt.Errorf("%s: %w", p.Name, err)
-			}
-			values[p.Name] = out
-		}
+		o.PublicURL, o.UploadError = url, ""
 	}
-	return nil
+}
+
+// withoutRaw drops the provider's raw response, which can hold megabytes of
+// base64 and is of no use to an agent reading job state.
+func withoutRaw(j *provider.Job) *provider.Job {
+	c := *j
+	c.Raw = nil
+	return &c
 }

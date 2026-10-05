@@ -1,12 +1,10 @@
 // Package uploader publishes generated artifacts to a public URL.
 //
-// Two problems need this. OpenAI returns images as base64 with no URL at all,
-// and RunPod's result URLs expire after 7 days — so neither gives you a link
-// you can keep. It also fixes the input side: RunPod endpoints fetch media by
-// URL, and inlining a local file as a data URI stops working on large files.
+// OpenAI returns images as base64 with no URL at all, so without this there is
+// no link to hand to another tool or person.
 //
-// Uploading is opt-in. Nothing leaves the machine unless a backend is
-// configured, because the zero-config hosts are public and permanent.
+// The CLI defaults to catbox (see config.DefaultUploadBackend). Its URLs are
+// public and permanent; set upload_backend to none to keep outputs local.
 package uploader
 
 import (
@@ -64,8 +62,8 @@ type Config struct {
 // Backends lists every selectable backend with a description.
 func Backends() [][2]string {
 	return [][2]string{
-		{BackendNone, "no uploading; outputs stay local (default)"},
-		{BackendCatbox, "catbox.moe — no account, 200 MB, permanent, public"},
+		{BackendNone, "no uploading; outputs stay local"},
+		{BackendCatbox, "catbox.moe — no account, 200 MB, permanent, public (default)"},
 		{BackendLitterbox, "litterbox.catbox.moe — no account, 1 GB, expires (1h/12h/24h/72h)"},
 		{BackendS3, "S3-compatible bucket you control (Cloudflare R2, AWS S3, B2, MinIO)"},
 	}

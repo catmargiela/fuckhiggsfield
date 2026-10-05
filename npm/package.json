@@ -1,7 +1,7 @@
 {
   "name": "@catmargiela/bara",
   "version": "0.1.0",
-  "description": "Generate images, video, and audio from the terminal with your own OpenAI and RunPod API keys.",
+  "description": "Generate images with GPT Image 2 from the terminal with your own OpenAI API key.",
   "bin": {
     "bara": "bin/bara.js"
   },

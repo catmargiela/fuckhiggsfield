@@ -30,7 +30,6 @@ func newGenerateCmd(app *App) *cobra.Command {
 		newGenerateGetCmd(app),
 		newGenerateListCmd(app),
 		newGenerateWaitCmd(app),
-		newGenerateCancelCmd(app),
 		newGenerateCostCmd(app),
 	)
 	return c
@@ -55,18 +54,20 @@ func newGenerateCreateCmd(app *App) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "create <model> [--param value]...",
 		Short: "Create a generation job",
-		Long: "Create an image, video, audio, or text job.\n\n" +
+		Long: "Create an image job.\n\n" +
 			"Model parameters are passed as --name value; run `bara model get <model>`\n" +
 			"to see what a model accepts. Media parameters take a local file path or a\n" +
-			"URL — local files are inlined automatically.\n\n" +
+			"URL.\n\n" +
 			"Control flags: --wait, --wait-timeout, --wait-interval, --out, --quiet,\n" +
 			"--no-save, --json, --upload [backend], --no-upload.\n\n" +
-			"--upload republishes each result to a public URL (see `bara upload backends`).\n" +
-			"It also applies to local media inputs, which lifts the inline size limit.",
+			"Each result is saved locally and published to the configured upload backend\n" +
+			"(catbox by default, see `bara upload backends`). --upload <backend> picks\n" +
+			"another one for this run; --no-upload keeps the result local. A failed\n" +
+			"upload is reported but does not fail the job.",
 		Example: "  bara generate create gpt_image_2 --prompt \"a cat in a spaceship\" --wait\n" +
-			"  bara generate create flux_dev --prompt \"golden hour city\" --width 1280 --height 720 --wait\n" +
-			"  bara generate create qwen_image_edit --prompt \"make it snow\" --image ./photo.png --wait\n" +
-			"  bara generate create wan_2_6_i2v --prompt \"slow push in\" --image ./still.png --duration 5 --wait",
+			"  bara generate create gpt_image_2 --prompt \"golden hour city\" --size 1536x1024 --quality high --wait\n" +
+			"  bara generate create gpt_image_2 --prompt \"make it snow\" --image ./photo.png --wait\n" +
+			"  bara generate create gpt_image_2 --prompt \"a logo\" --background transparent --no-upload --wait",
 		// Model parameters are discovered at runtime, so cobra must not try to
 		// parse them as its own flags.
 		DisableFlagParsing: true,
@@ -303,24 +304,16 @@ func runCreate(ctx context.Context, app *App, m catalog.Model, values map[string
 	if !opts.noUpload {
 		override := opts.upload
 		if override == "-" {
-			// Bare --upload: fall back to the configured backend, and if none
-			// is set, say so rather than silently doing nothing.
+			// Bare --upload: use the configured backend, and if uploading is
+			// switched off, say so rather than silently doing nothing.
 			override = ""
-			if app.Cfg.UploadBackend == "" || app.Cfg.UploadBackend == uploader.BackendNone {
+			if app.Cfg.EffectiveUploadBackend() == uploader.BackendNone {
 				return fmt.Errorf("--upload needs a backend: pass one (--upload catbox) or set a default with `bara settings set upload_backend <name>`\n\nRun `bara upload backends` to see the options")
 			}
 		}
 		var err error
 		up, err = app.Uploader(override)
 		if err != nil {
-			return err
-		}
-	}
-
-	// RunPod fetches media by URL, so local paths must be resolved first.
-	// OpenAI takes multipart uploads, so its provider handles paths directly.
-	if m.Provider == "runpod" {
-		if err := resolveMediaParams(cmdContext(ctx), m, values, up); err != nil {
 			return err
 		}
 	}
@@ -359,11 +352,9 @@ func runCreate(ctx context.Context, app *App, m catalog.Model, values map[string
 			return err
 		}
 		if up != nil {
-			if err := uploadOutputs(ctx, up, job); err != nil {
-				return err
-			}
+			uploadOutputs(ctx, up, job)
 			if !opts.quiet && !app.JSON {
-				fmt.Fprintf(app.Err, "%s\n", render.Dim("published via "+up.Describe()))
+				reportUploads(app, up, job)
 			}
 		}
 		store.Put(job)
@@ -381,48 +372,10 @@ func cmdContext(ctx context.Context) context.Context {
 	return ctx
 }
 
-// resolveMediaParams turns local paths into something RunPod can fetch. With an
-// uploader configured the file is published and referenced by URL, which avoids
-// the size ceiling that inline data URIs impose.
-func resolveMediaParams(ctx context.Context, m catalog.Model, values map[string]any, up uploader.Uploader) error {
-	resolve := func(ref string) (string, error) {
-		if up == nil || media.IsURL(ref) {
-			return media.Resolve(ref)
-		}
-		return uploadPath(ctx, up, ref)
-	}
-	for _, p := range m.Params {
-		if p.Media == "" {
-			continue
-		}
-		v, ok := values[p.Name]
-		if !ok {
-			continue
-		}
-		switch t := v.(type) {
-		case string:
-			resolved, err := resolve(t)
-			if err != nil {
-				return fmt.Errorf("--%s: %w", p.Name, err)
-			}
-			values[p.Name] = resolved
-		case []string:
-			out := make([]string, 0, len(t))
-			for _, ref := range t {
-				resolved, err := resolve(ref)
-				if err != nil {
-					return fmt.Errorf("--%s: %w", p.Name, err)
-				}
-				out = append(out, resolved)
-			}
-			values[p.Name] = out
-		}
-	}
-	return nil
-}
-
-// uploadOutputs republishes each saved artifact to a durable URL.
-func uploadOutputs(ctx context.Context, up uploader.Uploader, job *provider.Job) error {
+// uploadOutputs republishes each saved artifact to a durable URL. A failed
+// upload is recorded on the output rather than returned: the image is already
+// paid for and saved, so losing the job over a flaky host would be worse.
+func uploadOutputs(ctx context.Context, up uploader.Uploader, job *provider.Job) {
 	for i := range job.Outputs {
 		o := &job.Outputs[i]
 		if o.PublicURL != "" || o.LocalPath == "" {
@@ -430,11 +383,25 @@ func uploadOutputs(ctx context.Context, up uploader.Uploader, job *provider.Job)
 		}
 		url, err := uploadPath(cmdContext(ctx), up, o.LocalPath)
 		if err != nil {
-			return err
+			o.UploadError = err.Error()
+			continue
 		}
-		o.PublicURL = url
+		o.PublicURL, o.UploadError = url, ""
 	}
-	return nil
+}
+
+// reportUploads tells the user where outputs were published, or why not.
+func reportUploads(app *App, up uploader.Uploader, job *provider.Job) {
+	failed := 0
+	for _, o := range job.Outputs {
+		if o.UploadError != "" {
+			failed++
+			fmt.Fprintf(app.Err, "%s %s\n", render.Bold("upload failed:"), o.UploadError)
+		}
+	}
+	if failed < len(job.Outputs) {
+		fmt.Fprintf(app.Err, "%s\n", render.Dim("published via "+up.Describe()))
+	}
 }
 
 func waitForJob(ctx context.Context, app *App, store *jobs.Store, job *provider.Job, timeout, interval time.Duration, quiet bool) (*provider.Job, error) {
@@ -568,6 +535,9 @@ func printJob(app *App, job *provider.Job, quiet bool) error {
 			if o.PublicURL != "" {
 				fmt.Fprintf(app.Out, "%s  %s\n", render.Bold("url"), render.Cyan(o.PublicURL))
 			}
+			if o.UploadError != "" {
+				fmt.Fprintf(app.Out, "%s %s\n", render.Dim("  upload failed:"), render.Dim(o.UploadError))
+			}
 			if o.URL != "" {
 				// The provider's own link, which typically expires.
 				fmt.Fprintf(app.Out, "%s %s\n", render.Dim("  src"), render.Dim(o.URL))
@@ -582,12 +552,11 @@ func printJob(app *App, job *provider.Job, quiet bool) error {
 }
 
 func newGenerateGetCmd(app *App) *cobra.Command {
-	var refresh bool
-	c := &cobra.Command{
+	return &cobra.Command{
 		Use:     "get <job_id>",
 		Short:   "Show a job",
 		Args:    cobra.ExactArgs(1),
-		Example: "  bara generate get 9f3c...\n  bara generate get 9f3c... --refresh",
+		Example: "  bara generate get openai-1785685645692285000",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := app.Load(); err != nil {
 				return err
@@ -600,27 +569,9 @@ func newGenerateGetCmd(app *App) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if refresh && !job.Status.Terminal() && job.Provider == "runpod" {
-				p, err := app.ProviderByName(job.Provider)
-				if err != nil {
-					return err
-				}
-				updated, err := p.Get(cmd.Context(), job.Endpoint, job.ID)
-				if err != nil {
-					return err
-				}
-				updated.Model, updated.Created = job.Model, job.Created
-				job = updated
-				store.Put(job)
-				if err := store.Save(); err != nil {
-					return err
-				}
-			}
 			return printJob(app, job, false)
 		},
 	}
-	c.Flags().BoolVar(&refresh, "refresh", false, "poll the provider once before printing")
-	return c
 }
 
 func newGenerateListCmd(app *App) *cobra.Command {
@@ -727,45 +678,6 @@ func newGenerateWaitCmd(app *App) *cobra.Command {
 	return c
 }
 
-func newGenerateCancelCmd(app *App) *cobra.Command {
-	return &cobra.Command{
-		Use:   "cancel <job_id>",
-		Short: "Cancel a queued or running job",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := app.Load(); err != nil {
-				return err
-			}
-			store, err := jobs.Open()
-			if err != nil {
-				return err
-			}
-			job, err := store.Get(args[0])
-			if err != nil {
-				return err
-			}
-			p, err := app.ProviderByName(job.Provider)
-			if err != nil {
-				return err
-			}
-			cancel, ok := p.(provider.Canceler)
-			if !ok {
-				return fmt.Errorf("%s jobs cannot be cancelled", job.Provider)
-			}
-			if err := cancel.Cancel(cmd.Context(), job.Endpoint, job.ID); err != nil {
-				return err
-			}
-			job.Status = provider.StatusCancelled
-			store.Put(job)
-			if err := store.Save(); err != nil {
-				return err
-			}
-			fmt.Fprintf(app.Out, "cancelled %s\n", job.ID)
-			return nil
-		},
-	}
-}
-
 func newGenerateCostCmd(app *App) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "cost <model> [--param value]...",
@@ -775,7 +687,7 @@ func newGenerateCostCmd(app *App) *cobra.Command {
 			"computed estimate.\n\n" +
 			"This reads published rates; it is not a quote from the provider.",
 		DisableFlagParsing: true,
-		Example:            "  bara generate cost flux_dev --width 1024 --height 1024\n  bara generate cost vidu_q3_t2v --duration 10",
+		Example:            "  bara generate cost gpt_image_2 --n 4",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 || hasHelpFlag(args) {
 				return cmd.Help()
@@ -824,66 +736,27 @@ func newGenerateCostCmd(app *App) *cobra.Command {
 	return c
 }
 
-var (
-	rePerImage = regexp.MustCompile(`\$([0-9.]+)\s*per image`)
-	rePerSec   = regexp.MustCompile(`\$([0-9.]+)\s*(?:per second|/sec)`)
-	rePerMP    = regexp.MustCompile(`\$([0-9.]+)\s*per megapixel`)
-	rePerKChar = regexp.MustCompile(`\$([0-9.]+)\s*per 1[,]?000 characters`)
-)
+var rePerImage = regexp.MustCompile(`\$([0-9.]+)\s*per image`)
 
 // estimateCost derives a figure from the published rate when the rate is a
-// single per-unit price and the driving parameter is known. Anything with
-// tiered or range pricing returns ok=false rather than a guess.
+// single per-image price. Anything with tiered or range pricing returns
+// ok=false rather than a guess.
 func estimateCost(m catalog.Model, values map[string]any) (usd float64, basis string, ok bool) {
 	price := m.Price
 	// A range (e.g. "$0.14 - $0.24") means tiered pricing; refuse to pick one.
 	if strings.Count(price, "$") > 1 {
 		return 0, "", false
 	}
-	num := func(re *regexp.Regexp) (float64, bool) {
-		mm := re.FindStringSubmatch(price)
-		if len(mm) < 2 {
-			return 0, false
-		}
-		f, err := strconv.ParseFloat(mm[1], 64)
-		return f, err == nil
+	mm := rePerImage.FindStringSubmatch(price)
+	if len(mm) < 2 {
+		return 0, "", false
 	}
-	if rate, found := num(rePerImage); found {
-		n := intValue(values["n"], 1)
-		return rate * float64(n), fmt.Sprintf("%d image(s) x $%g", n, rate), true
+	rate, err := strconv.ParseFloat(mm[1], 64)
+	if err != nil {
+		return 0, "", false
 	}
-	if rate, found := num(rePerSec); found {
-		d, has := values["duration"]
-		if !has {
-			return 0, "", false
-		}
-		secs := intValue(d, 0)
-		if secs <= 0 {
-			return 0, "", false
-		}
-		return rate * float64(secs), fmt.Sprintf("%ds x $%g/sec", secs, rate), true
-	}
-	if rate, found := num(rePerMP); found {
-		w, hOK := values["width"], true
-		h, hOK2 := values["height"]
-		if !hOK || !hOK2 {
-			return 0, "", false
-		}
-		mp := float64(intValue(w, 0)) * float64(intValue(h, 0)) / 1e6
-		if mp <= 0 {
-			return 0, "", false
-		}
-		return rate * mp, fmt.Sprintf("%.2f MP x $%g/MP", mp, rate), true
-	}
-	if rate, found := num(rePerKChar); found {
-		p, _ := values["prompt"].(string)
-		if p == "" {
-			return 0, "", false
-		}
-		k := float64(len([]rune(p))) / 1000
-		return rate * k, fmt.Sprintf("%d chars x $%g/1k", len([]rune(p)), rate), true
-	}
-	return 0, "", false
+	n := intValue(values["n"], 1)
+	return rate * float64(n), fmt.Sprintf("%d image(s) x $%g", n, rate), true
 }
 
 func intValue(v any, def int) int {
